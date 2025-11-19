@@ -39,10 +39,12 @@ class DfuException(Exception):
     pass
 
 class NordicLegacyDFU:
-    def __init__(self, zip_path: str, prn: int, packet_delay: float):
+    def __init__(self, zip_path: str, prn: int, packet_delay: float, adapter: str = None):
         self.zip_path = zip_path
         self.prn = prn
-        self.packet_delay = packet_delay # Delay between Start and Size
+        self.packet_delay = packet_delay
+        self.adapter = adapter  # Specific adapter (e.g., 'hci0')
+
         self.manifest = None
         self.bin_data = None
         self.dat_data = None
@@ -84,7 +86,6 @@ class NordicLegacyDFU:
                     raise DfuException("Could not auto-detect firmware files in ZIP.")
 
     async def _notification_handler(self, sender, data):
-        # Convert to bytearray for consistent indexing
         data = bytearray(data)
         opcode = data[0]
 
@@ -95,7 +96,6 @@ class NordicLegacyDFU:
             await self.response_queue.put((request_op, status))
 
         elif opcode == OP_CODE_PACKET_RECEIPT_NOTIF:
-            # structure: 0x11 + uint32 bytes_received
             if len(data) >= 5:
                 bytes_received = struct.unpack('<I', data[1:5])[0]
                 logger.debug(f"<< RX PRN: {bytes_received} bytes")
@@ -106,7 +106,6 @@ class NordicLegacyDFU:
             request_op, status = await asyncio.wait_for(self.response_queue.get(), timeout)
             if request_op != expected_op_code:
                 logger.warning(f"Unexpected response op code: {request_op:#02x}, expected {expected_op_code:#02x}. Ignoring.")
-                # Recursively wait for the next one? For now, just return failure if mismatch.
                 return -1
 
             if status != 1: # 1 = SUCCESS
@@ -122,7 +121,8 @@ class NordicLegacyDFU:
     async def jump_to_bootloader(self, device: BLEDevice):
         logger.info(f"Connecting to {device.name} ({device.address}) to trigger Bootloader Jump...")
         try:
-            async with BleakClient(device) as client:
+            # Pass the adapter arg to the client
+            async with BleakClient(device, adapter=self.adapter) as client:
                 await client.start_notify(DFU_CONTROL_POINT_UUID, self._notification_handler)
                 payload = bytearray([OP_CODE_ENTER_BOOTLOADER, UPLOAD_MODE_APPLICATION])
                 logger.info(">> TX Enter Bootloader (0x01, 0x04)")
@@ -143,13 +143,12 @@ class NordicLegacyDFU:
             logger.info(f"Starting DFU connection attempt {attempt+1}/{max_retries}...")
 
             try:
-                async with BleakClient(device, timeout=20.0) as client:
+                # Pass the adapter arg to the client
+                async with BleakClient(device, timeout=20.0, adapter=self.adapter) as client:
                     self.client = client
 
-                    # --- STEP 0: STABILIZE ---
                     logger.info("Connected.")
 
-                    # Read Version to verify connection is valid
                     try:
                         version_data = await client.read_gatt_char(DFU_VERSION_UUID)
                         version = struct.unpack('<H', version_data)[0]
@@ -159,27 +158,18 @@ class NordicLegacyDFU:
                     except Exception as e:
                         logger.warning(f"Could not read DFU Version: {e}")
                         logger.warning("Device might not be ready. Retrying...")
-                        continue # Retry loop
+                        continue
 
-                    # Enable Notifications
                     logger.debug("Enabling notifications...")
                     await client.start_notify(DFU_CONTROL_POINT_UUID, self._notification_handler)
 
-                    # Flush queue
                     while not self.response_queue.empty(): self.response_queue.get_nowait()
 
-                    # --- STEP 1: START DFU ---
                     logger.info("Initialize DFU parameters...")
-
-                    # Send Start DFU [0x01, 0x04]
                     start_payload = bytearray([OP_CODE_START_DFU, UPLOAD_MODE_APPLICATION])
                     logger.debug(f">> TX Start DFU: {start_payload.hex()}")
                     await client.write_gatt_char(DFU_CONTROL_POINT_UUID, start_payload, response=True)
 
-                    # --- CRITICAL TIMING ---
-                    # The bootloader expects the Size Packet immediately.
-                    # If this delay is too short, Bleak/OS might merge packets or drop them.
-                    # If too long, Bootloader times out.
                     logger.debug(f"Waiting {self.packet_delay}s before sending size...")
                     await asyncio.sleep(self.packet_delay)
 
@@ -191,12 +181,9 @@ class NordicLegacyDFU:
                     logger.info(f"Sending firmware size ({app_size} bytes)...")
                     logger.debug(f">> TX Data (Size): {size_payload.hex()}")
 
-                    # Write to PACKET UUID, usually response=False (Write Command)
                     await client.write_gatt_char(DFU_PACKET_UUID, size_payload, response=False)
 
-                    # Wait for Response
                     status = await self._wait_for_response(OP_CODE_START_DFU)
-
                     if status != 1:
                         logger.warning(f"Start DFU failed (Status {status}). Attempting Reset...")
                         try:
@@ -205,7 +192,6 @@ class NordicLegacyDFU:
                             pass
                         raise DfuException("Start DFU sequence failed")
 
-                    # --- STEP 2: INIT PACKET ---
                     logger.info("Sending Init Packet...")
                     logger.debug(">> TX Init Params Start")
                     await client.write_gatt_char(DFU_CONTROL_POINT_UUID, bytearray([OP_CODE_INIT_DFU_PARAMS, 0x00]), response=True)
@@ -219,37 +205,28 @@ class NordicLegacyDFU:
                     status = await self._wait_for_response(OP_CODE_INIT_DFU_PARAMS)
                     if status != 1: raise DfuException(f"Init Packet failed. Status: {status}")
 
-                    # --- STEP 3: CONFIGURE PRN ---
                     if self.prn > 0:
                         logger.info(f"Enabling PRN every {self.prn} packets")
                         prn_payload = bytearray([OP_CODE_PACKET_RECEIPT_NOTIF_REQ]) + struct.pack('<H', self.prn)
                         logger.debug(f">> TX PRN Config: {prn_payload.hex()}")
                         await client.write_gatt_char(DFU_CONTROL_POINT_UUID, prn_payload, response=True)
-                        # Some bootloaders don't ack this specifically, or respond with 0x10 0x08 0x01
-                        # We wait briefly.
-                        # await self._wait_for_response(OP_CODE_PACKET_RECEIPT_NOTIF_REQ, timeout=2.0)
 
-                    # --- STEP 4: RECEIVE FIRMWARE IMAGE ---
                     logger.info("Requesting Firmware Upload...")
                     logger.debug(">> TX Receive Firmware Image")
                     await client.write_gatt_char(DFU_CONTROL_POINT_UUID, bytearray([OP_CODE_RECEIVE_FIRMWARE_IMAGE]), response=True)
 
-                    # --- STEP 5: STREAM BINARY ---
                     await self._stream_firmware()
 
-                    # --- STEP 6: CHECK UPLOAD STATUS ---
                     logger.info("Checking upload status...")
                     status = await self._wait_for_response(OP_CODE_RECEIVE_FIRMWARE_IMAGE)
                     if status != 1: raise DfuException(f"Upload failed. Status: {status}")
 
-                    # --- STEP 7: VALIDATE ---
                     logger.info("Validating...")
                     logger.debug(">> TX Validate")
                     await client.write_gatt_char(DFU_CONTROL_POINT_UUID, bytearray([OP_CODE_VALIDATE]), response=True)
                     status = await self._wait_for_response(OP_CODE_VALIDATE)
                     if status != 1: raise DfuException(f"Validation failed. Status: {status}")
 
-                    # --- STEP 8: ACTIVATE AND RESET ---
                     logger.info("Activating and Resetting...")
                     try:
                         await client.write_gatt_char(DFU_CONTROL_POINT_UUID, bytearray([OP_CODE_ACTIVATE_AND_RESET]), response=True)
@@ -257,7 +234,7 @@ class NordicLegacyDFU:
                         pass
 
                     logger.info("DFU Complete. Device should restart.")
-                    return # SUCCESS
+                    return
 
             except Exception as e:
                 logger.error(f"Error during attempt {attempt+1}: {e}")
@@ -283,13 +260,12 @@ class NordicLegacyDFU:
             self.bytes_sent += len(chunk)
             packets_sent_since_prn += 1
 
-            if i % 4000 == 0: # Reduce print frequency
+            if i % 4000 == 0:
                 print(f"Progress: {int((self.bytes_sent / total_bytes) * 100)}%", end='\r')
 
             if self.prn > 0 and packets_sent_since_prn >= self.prn:
                 self.pkg_receipt_event.clear()
                 try:
-                    # Wait for PRN notification
                     await asyncio.wait_for(self.pkg_receipt_event.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     logger.warning("PRN Timeout, continuing...")
@@ -298,18 +274,23 @@ class NordicLegacyDFU:
 
         print(f"Progress: 100%")
 
-async def find_device(name_or_address: str, force_scan: bool, service_uuid: str = None) -> BLEDevice:
-    logger.info(f"Scanning for {name_or_address}...")
+async def find_device(name_or_address: str, force_scan: bool, adapter: str = None, service_uuid: str = None) -> BLEDevice:
+    logger.info(f"Scanning for {name_or_address} (Adapter: {adapter or 'default'})...")
 
-    if not force_scan:
+    # If using a specific adapter on Linux, force scanning logic,
+    # because find_device_by_address doesn't always respect adapter arg reliably across versions
+    if not force_scan and not adapter:
         try:
+            # Basic check without adapter preference
             device = await BleakScanner.find_device_by_address(name_or_address, timeout=10.0)
             if device:
                 return device
         except BleakError:
             pass
 
-    scanner = BleakScanner()
+    # Explicit Scan with Adapter selection
+    # Note: adapter arg is typically "hci0", "hci1" on Linux. Ignored on Windows/Mac.
+    scanner = BleakScanner(adapter=adapter)
     scanned_devices = await scanner.discover(timeout=5.0, return_adv=True)
 
     target = None
@@ -342,45 +323,43 @@ async def main():
     parser.add_argument("file", help="Path to the ZIP firmware file")
     parser.add_argument("device", help="Device Name or BLE Address")
     parser.add_argument("--scan", action="store_true", help="Force scan even if address is provided")
+    parser.add_argument("--adapter", default=None, help="Bluetooth Adapter interface (Linux: hci0, hci1). Ignored on Win/Mac.")
     parser.add_argument("--prn", type=int, default=12, help="PRN interval (default 12, 0 disable)")
     parser.add_argument("--delay", type=float, default=0.2, help="Delay between Start DFU and Size packet in seconds (default 0.2)")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logs")
 
     args = parser.parse_args()
 
-    # Set logging level
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
     else:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
-        # Suppress bleak internal logs unless verbose
         logging.getLogger("bleak").setLevel(logging.WARNING)
 
-    dfu = NordicLegacyDFU(args.file, args.prn, args.delay)
+    # Pass adapter to class for client connections
+    dfu = NordicLegacyDFU(args.file, args.prn, args.delay, adapter=args.adapter)
 
     try:
         dfu.parse_zip()
-        app_device = await find_device(args.device, args.scan)
+
+        # Pass adapter to scanner
+        app_device = await find_device(args.device, args.scan, adapter=args.adapter)
+
         await dfu.jump_to_bootloader(app_device)
 
         logger.info("Waiting for device to reboot into DFU mode (5s)...")
         await asyncio.sleep(5.0)
 
-        # Try to find bootloader
-        # 1. Try same address (sometimes bootloader uses same address)
-        # 2. Try +1 address
-        # 3. Try DFU Service UUID
-
         bootloader_device = None
 
-        # Method A: DFU Service UUID (Most reliable if advertising)
+        # Method A: DFU Service UUID
         try:
             logger.info("Scanning for DFU Bootloader (Service UUID)...")
-            bootloader_device = await find_device("DFU", force_scan=True, service_uuid=DFU_SERVICE_UUID)
+            bootloader_device = await find_device("DFU", force_scan=True, adapter=args.adapter, service_uuid=DFU_SERVICE_UUID)
         except DfuException:
             pass
 
-        # Method B: Address guessing (if UUID scan failed)
+        # Method B: Address guessing
         if not bootloader_device:
             original_mac = app_device.address
             if ":" in original_mac and len(original_mac) == 17:
@@ -390,7 +369,7 @@ async def main():
                     last_byte = (last_byte + 1) & 0xFF
                     bootloader_mac_hint = f"{prefix}{last_byte:02X}"
                     logger.info(f"Scanning for DFU Bootloader (Address Hint: {bootloader_mac_hint})...")
-                    bootloader_device = await find_device(bootloader_mac_hint, force_scan=True)
+                    bootloader_device = await find_device(bootloader_mac_hint, force_scan=True, adapter=args.adapter)
                 except:
                     pass
 
