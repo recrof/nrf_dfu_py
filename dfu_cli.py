@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
+# --- START OF FILE dfu_cli.py ---
+
 import asyncio
 import argparse
 import logging
 import sys
 import time
 
-from dfu_lib import NordicLegacyDFU, find_device_by_name_or_address, DfuException, DFU_SERVICE_UUID
+# Update import to include the new find_any_device function
+from dfu_lib import NordicLegacyDFU, find_any_device, find_device_by_name_or_address, DfuException, DFU_SERVICE_UUID
 
 # --- Custom Logger for CLI ---
 class MsFormatter(logging.Formatter):
@@ -30,7 +33,10 @@ def cli_progress_handler(pct):
 async def main():
     parser = argparse.ArgumentParser(description="Nordic Semi Buttonless Legacy DFU Utility (CLI)")
     parser.add_argument("file", help="Path to the ZIP firmware file")
-    parser.add_argument("device", help="Device Name or BLE Address")
+
+    # Changed: nargs='+' allows multiple arguments to be collected into a list
+    parser.add_argument("device", nargs='+', help="Device Name(s) or BLE Address(es). You can provide multiple.")
+
     parser.add_argument("--scan", action="store_true", help="Force scan even if address is provided")
     parser.add_argument("--adapter", default=None, help="Bluetooth Adapter interface (Linux: hci0)")
     parser.add_argument("--prn", type=int, default=8, help="PRN interval (default 8)")
@@ -38,7 +44,7 @@ async def main():
     parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logs")
 
     # New Arguments
-    parser.add_argument("--wait", action="store_true", help="Loop indefinitely until the target device is found")
+    parser.add_argument("--wait", action="store_true", help="Loop indefinitely until one of the target devices is found")
     parser.add_argument("--retry", type=int, default=3, help="Number of DFU connection retries (default 3)")
 
     args = parser.parse_args()
@@ -63,21 +69,24 @@ async def main():
         dfu = NordicLegacyDFU(args.file, args.prn, args.delay, adapter=args.adapter, progress_callback=cli_progress_handler)
         dfu.parse_zip()
 
-        logger.info(f"Scanning for {args.device}...")
+        logger.info(f"Scanning for target(s): {args.device}...")
 
         # --- WAIT / SCAN Loop ---
         app_device = None
         while True:
             try:
-                app_device = await find_device_by_name_or_address(args.device, args.scan, adapter=args.adapter)
+                # Use find_any_device to check all inputs in a single scan cycle
+                app_device = await find_any_device(args.device, adapter=args.adapter)
+                logger.info(f"Found target: {app_device.name} ({app_device.address})")
                 break # Found!
             except DfuException:
                 if args.wait:
-                    logger.info(f"Device {args.device} not found. Waiting...")
+                    logger.info("No devices found. Retrying scan...")
                     await asyncio.sleep(2.0)
                     continue
                 else:
-                    raise # Rethrow if not waiting
+                    logger.error(f"Could not find any of: {args.device}")
+                    sys.exit(1)
 
         await dfu.jump_to_bootloader(app_device)
 

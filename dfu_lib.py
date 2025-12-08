@@ -1,3 +1,4 @@
+# --- START OF FILE dfu_lib.py ---
 import asyncio
 import logging
 import struct
@@ -256,7 +257,6 @@ async def scan_for_devices(adapter: str = None) -> List[BLEDevice]:
 async def find_device_by_name_or_address(name_or_address: str, force_scan: bool, adapter: str = None, service_uuid: str = None) -> BLEDevice:
     """
     Helper to find a specific device.
-    Uses return_adv=True to correctly inspect Service UUIDs.
     """
     if not force_scan and not adapter:
         try:
@@ -266,7 +266,6 @@ async def find_device_by_name_or_address(name_or_address: str, force_scan: bool,
             pass
 
     scanner = BleakScanner(adapter=adapter)
-    # Important: return_adv=True returns a dict {address: (device, advertisement_data)}
     scanned_devices = await scanner.discover(timeout=5.0, return_adv=True)
 
     target = None
@@ -275,12 +274,10 @@ async def find_device_by_name_or_address(name_or_address: str, force_scan: bool,
         if d.address.upper() == name_or_address.upper():
             target = d; break
 
-        # Check advertised name (AdvertisementData local_name or Device name)
         adv_name = adv.local_name or d.name or ""
         if adv_name == name_or_address:
             target = d; break
 
-        # Check Service UUIDs in Advertisement Data
         if not target and service_uuid:
             if service_uuid.lower() in [u.lower() for u in adv.service_uuids]:
                 target = d; break
@@ -289,3 +286,35 @@ async def find_device_by_name_or_address(name_or_address: str, force_scan: bool,
         raise DfuException("Device not found.")
 
     return target
+
+async def find_any_device(identifiers: List[str], adapter: str = None, service_uuid: str = None) -> BLEDevice:
+    """
+    Scans once and checks if ANY of the provided identifiers match found devices.
+    Returns the first device that matches.
+    """
+    scanner = BleakScanner(adapter=adapter)
+    # Perform a single broadcast scan
+    scanned_devices = await scanner.discover(timeout=5.0, return_adv=True)
+
+    for identifier in identifiers:
+        identifier_upper = identifier.upper()
+
+        for key, (d, adv) in scanned_devices.items():
+            # 1. Check Address Match
+            if d.address.upper() == identifier_upper:
+                return d
+
+            # 2. Check Name Match
+            adv_name = adv.local_name or d.name or ""
+            if adv_name == identifier:
+                return d
+
+            # 3. Check Service UUID (only if identifier matches special UUID string if applicable)
+            # (Logic handled separately usually, but here checking generally)
+            if service_uuid and service_uuid.lower() in [u.lower() for u in adv.service_uuids]:
+                # This is a bit ambiguous if multiple devices have the UUID,
+                # but this function targets specific identifiers.
+                # If identifier was "DFU_SERVICE", it would catch here.
+                pass
+
+    raise DfuException(f"No devices found matching: {identifiers}")
