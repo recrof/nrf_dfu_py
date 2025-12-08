@@ -37,6 +37,10 @@ async def main():
     parser.add_argument("--delay", type=float, default=0.4, help="Start/Size Delay (default 0.4s)")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logs")
 
+    # New Arguments
+    parser.add_argument("--wait", action="store_true", help="Loop indefinitely until the target device is found")
+    parser.add_argument("--retry", type=int, default=3, help="Number of DFU connection retries (default 3)")
+
     args = parser.parse_args()
 
     handler = logging.StreamHandler()
@@ -60,7 +64,20 @@ async def main():
         dfu.parse_zip()
 
         logger.info(f"Scanning for {args.device}...")
-        app_device = await find_device_by_name_or_address(args.device, args.scan, adapter=args.adapter)
+
+        # --- WAIT / SCAN Loop ---
+        app_device = None
+        while True:
+            try:
+                app_device = await find_device_by_name_or_address(args.device, args.scan, adapter=args.adapter)
+                break # Found!
+            except DfuException:
+                if args.wait:
+                    logger.info(f"Device {args.device} not found. Waiting...")
+                    await asyncio.sleep(2.0)
+                    continue
+                else:
+                    raise # Rethrow if not waiting
 
         await dfu.jump_to_bootloader(app_device)
 
@@ -89,8 +106,12 @@ async def main():
         if not bootloader_device:
             raise DfuException("Could not locate DFU Bootloader device.")
 
-        await dfu.perform_update(bootloader_device)
+        # Pass the custom retry count here
+        await dfu.perform_update(bootloader_device, max_retries=args.retry)
 
+    except KeyboardInterrupt:
+        logger.info("\nOperation Cancelled by User.")
+        sys.exit(0)
     except Exception as e:
         logger.error(f"Failed: {e}")
         sys.exit(1)

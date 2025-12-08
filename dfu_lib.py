@@ -1,4 +1,3 @@
-# --- START OF FILE dfu_lib.py ---
 import asyncio
 import logging
 import struct
@@ -139,11 +138,10 @@ class NordicLegacyDFU:
         except Exception as e:
             self._log(f"Jump connection sequence ended: {e}")
 
-    async def perform_update(self, device: BLEDevice):
+    async def perform_update(self, device: BLEDevice, max_retries: int = 3):
         self._log(f"Target Bootloader: {device.address}")
         self.reset_in_progress = False
 
-        max_retries = 3
         for attempt in range(max_retries):
             self._log(f"DFU connection attempt {attempt+1}/{max_retries}...")
 
