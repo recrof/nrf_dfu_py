@@ -1,0 +1,135 @@
+name: Build Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  # --- Windows & Linux (AMD64) & macOS (Intel + Apple Silicon) ---
+  build:
+    name: Build ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            artifact_name: NordicDFU-Windows-x64.exe
+            asset_name: NordicDFU-Windows-x64.exe
+
+          - os: ubuntu-20.04  # Use older Ubuntu for better compatibility (glibc)
+            arch: x64
+            artifact_name: NordicDFU
+            asset_name: NordicDFU-Linux-x64
+
+          - os: macos-13      # Intel Mac
+            arch: x64
+            artifact_name: NordicDFU.app
+            asset_name: NordicDFU-macOS-Intel.zip
+
+          - os: macos-14      # Apple Silicon (M1/M2)
+            arch: arm64
+            artifact_name: NordicDFU.app
+            asset_name: NordicDFU-macOS-Silicon.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      # Linux specific: Install Tkinter
+      - name: Install Tkinter (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build with PyInstaller (Windows/Linux)
+        if: runner.os != 'macOS'
+        run: pyinstaller dfu_gui.py --clean --onefile --windowed --name NordicDFU
+
+      - name: Build with PyInstaller (macOS)
+        # On Mac, --onefile works, but --windowed creates an .app bundle which is cleaner
+        if: runner.os == 'macOS'
+        run: pyinstaller dfu_gui.py --clean --windowed --name NordicDFU
+
+      # --- Packaging Steps ---
+
+      # Windows: Just rename the exe
+      - name: Prepare Upload (Windows)
+        if: runner.os == 'Windows'
+        run: move dist\NordicDFU.exe dist\${{ matrix.asset_name }}
+
+      # Linux: Rename and make executable
+      - name: Prepare Upload (Linux)
+        if: runner.os == 'Linux'
+        run: mv dist/NordicDFU dist/${{ matrix.asset_name }}
+
+      # macOS: Zip the .app bundle
+      - name: Prepare Upload (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          zip -r ${{ matrix.asset_name }} NordicDFU.app
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/${{ matrix.asset_name }}
+
+  # --- Linux ARM64 (Requires QEMU) ---
+  build-linux-arm64:
+    name: Build Linux (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build in Docker (ARM64)
+        run: |
+          # We use a python container running on emulated arm64 to build the binary
+          docker run --rm -v ${{ github.workspace }}:/src --platform linux/arm64 python:3.11-slim-bookworm /bin/bash -c "
+            apt-get update && apt-get install -y python3-tk binutils &&
+            cd /src &&
+            pip install pyinstaller -r requirements.txt &&
+            pyinstaller dfu_gui.py --clean --onefile --windowed --name NordicDFU &&
+            mv dist/NordicDFU dist/NordicDFU-Linux-arm64
+          "
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-linux-arm64
+          path: dist/NordicDFU-Linux-arm64
+
+  # --- Release Creation ---
+  release:
+    needs: [build, build-linux-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
