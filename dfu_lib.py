@@ -128,6 +128,7 @@ class NordicLegacyDFU:
         try:
             async with BleakClient(device, adapter=self.adapter) as client:
                 await client.start_notify(DFU_CONTROL_POINT_UUID, self._notification_handler)
+                self._log(f"MTU after start_notify: {client.mtu_size}")
                 payload = bytearray([OP_CODE_ENTER_BOOTLOADER, UPLOAD_MODE_APPLICATION])
 
                 logger.debug(f">> TX Jump: {payload.hex()}")
@@ -149,6 +150,7 @@ class NordicLegacyDFU:
             try:
                 async with BleakClient(device, timeout=20.0, adapter=self.adapter) as client:
                     self.client = client
+                    self._log(f"MTU: {client.mtu_size}")
                     await client.start_notify(DFU_CONTROL_POINT_UUID, self._notification_handler)
                     while not self.response_queue.empty(): self.response_queue.get_nowait()
 
@@ -194,7 +196,8 @@ class NordicLegacyDFU:
 
                     # Validate
                     self._log("Verifying Upload...")
-                    status = await self._wait_for_response(OP_CODE_RECEIVE_FIRMWARE_IMAGE)
+                    flash_write_timeout = max(60.0, len(self.bin_data) / 50000) # Longer timeout for flash write completion - ~1s per 50KB
+                    status = await self._wait_for_response(OP_CODE_RECEIVE_FIRMWARE_IMAGE, timeout=flash_write_timeout)
                     if status != 1: raise DfuException(f"Upload failed. Status: {status}")
 
                     self._log("Validating...")
@@ -220,7 +223,8 @@ class NordicLegacyDFU:
                     raise e
 
     async def _stream_firmware(self):
-        chunk_size = 20
+        chunk_size = min(self.client.mtu_size - 3, 244)  # ATT overhead, cap at 244
+        self._log(f"Using chunk_size = {chunk_size}")
         total_bytes = len(self.bin_data)
         packets_since_prn = 0
         self.bytes_sent = 0
