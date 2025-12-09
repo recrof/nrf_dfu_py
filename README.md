@@ -25,8 +25,10 @@ This project has been split into a modular library, a Command Line Interface (CL
 *   A Bluetooth Low Energy (BLE) adapter.
 
 ## Installation
-Download pre-built GUI binary from [releases](https://github.com/recrof/nrf_dfu_py/releases)
-
+1. **Download pre-built GUI binary from [releases](https://github.com/recrof/nrf_dfu_py/releases)** 
+2. **Linux only: make it executable `chmod +x NordicDFU-Linux-x64` or `chmod +x NordicDFU-Linux-arm64`**
+3. **Execute the binary**
+   
 or
 
 1.  **Clone or download this repository.**
