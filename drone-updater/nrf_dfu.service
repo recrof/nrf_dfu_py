@@ -1,0 +1,13 @@
+[Unit]
+Description=Automatic NRF52 DFU Updater
+After=bluetooth.target
+
+[Service]
+Type=simple
+Restart=always
+WorkingDirectory=/opt/nrf_dfu_py
+ExecStartPre=+/usr/sbin/rfkill unblock all
+ExecStart=/bin/sh dfu_service.sh
+
+[Install]
+WantedBy=bluetooth.target
