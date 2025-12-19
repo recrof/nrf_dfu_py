@@ -348,6 +348,9 @@ async def find_any_device(identifiers: List[str], adapter: str = None, service_u
             # 3. Check Service UUID (only if identifier matches special UUID string if applicable)
             # (Logic handled separately usually, but here checking generally)
             if service_uuid and service_uuid.lower() in [u.lower() for u in adv.service_uuids]:
+                # This is a bit ambiguous if multiple devices have the UUID,
+                # but this function targets specific identifiers.
+                # If identifier was "DFU_SERVICE", it would catch here.
                 pass
 
     raise DfuException(f"No devices found matching: {identifiers}")
