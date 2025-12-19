@@ -286,11 +286,14 @@ class NordicLegacyDFU:
             self.progress_callback(100)
 
 async def scan_for_devices(adapter: str = None) -> List[BLEDevice]:
-
+    """Returns a list of all found devices (simple scan)."""
     scanner = BleakScanner(adapter=adapter)
     return await scanner.discover(timeout=5.0)
 
 async def find_device_by_name_or_address(name_or_address: str, force_scan: bool, adapter: str = None, service_uuid: str = None) -> BLEDevice:
+    """
+    Helper to find a specific device.
+    """
     if not force_scan and not adapter:
         try:
             device = await BleakScanner.find_device_by_address(name_or_address, timeout=10.0)
@@ -321,20 +324,29 @@ async def find_device_by_name_or_address(name_or_address: str, force_scan: bool,
     return target
 
 async def find_any_device(identifiers: List[str], adapter: str = None, service_uuid: str = None) -> BLEDevice:
+    """
+    Scans once and checks if ANY of the provided identifiers match found devices.
+    Returns the first device that matches.
+    """
     scanner = BleakScanner(adapter=adapter)
+    # Perform a single broadcast scan
     scanned_devices = await scanner.discover(timeout=5.0, return_adv=True)
 
     for identifier in identifiers:
         identifier_upper = identifier.upper()
 
         for key, (d, adv) in scanned_devices.items():
+            # 1. Check Address Match
             if d.address.upper() == identifier_upper:
                 return d
 
+            # 2. Check Name Match
             adv_name = adv.local_name or d.name or ""
             if adv_name == identifier:
                 return d
 
+            # 3. Check Service UUID (only if identifier matches special UUID string if applicable)
+            # (Logic handled separately usually, but here checking generally)
             if service_uuid and service_uuid.lower() in [u.lower() for u in adv.service_uuids]:
                 pass
 
