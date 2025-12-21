@@ -257,6 +257,7 @@ class NordicLegacyDFU:
         chunk_size = min(mtu - 3, 244)  # ATT overhead, cap at 244
         if chunk_size < 20: chunk_size = 20
         self._log(f"Using chunk_size = {chunk_size}")
+        self._last_progress_block = -1
         total_bytes = len(self.bin_data)
         packets_since_prn = 0
         self.bytes_sent = 0
@@ -271,10 +272,13 @@ class NordicLegacyDFU:
             self.bytes_sent += len(chunk)
             packets_since_prn += 1
 
-            if i % 2000 == 0 or i == 0:
-                pct = int((self.bytes_sent / total_bytes) * 100)
+            pct = int((self.bytes_sent * 100) / total_bytes)
+
+            last_pct = getattr(self, "_last_progress_pct", -1)
+            if pct > last_pct:
                 if self.progress_callback:
                     self.progress_callback(pct)
+                self._last_progress_pct = pct
 
             if self.prn > 0 and packets_since_prn >= self.prn:
                 self.pkg_receipt_event.clear()
@@ -285,7 +289,8 @@ class NordicLegacyDFU:
                 packets_since_prn = 0
 
         if self.progress_callback:
-            self.progress_callback(100)
+            if getattr(self, "_last_progress_pct", -1) < 100:
+                self.progress_callback(100)
 
 async def scan_for_devices(adapter: str = None) -> List[BLEDevice]:
     """Returns a list of all found devices (simple scan)."""
