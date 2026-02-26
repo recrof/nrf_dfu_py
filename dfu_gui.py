@@ -6,6 +6,7 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 import asyncio
 import os
+import platform
 from datetime import datetime
 
 # Import BleakScanner directly to handle real-time callbacks in the GUI
@@ -47,7 +48,9 @@ class DfuApp:
         style = ttk.Style()
         style.configure("Bold.TLabel", font=("Helvetica", 10, "bold"))
 
-        # --- Section 1: Settings (PRN, Timeout, Force Scan) ---
+        is_macos = platform.system() == "Darwin"
+
+        # --- Section 1: Settings (PRN, Timeout, Force Scan, High MTU) ---
         settings_frame = ttk.LabelFrame(root, text="Settings", padding=10)
         settings_frame.pack(fill="x", padx=10, pady=5)
 
@@ -67,6 +70,15 @@ class DfuApp:
         self.timeout_var = tk.StringVar(value="5")
         self.spin_timeout = ttk.Spinbox(settings_frame, from_=1, to=60, textvariable=self.timeout_var, width=5)
         self.spin_timeout.grid(row=0, column=4, sticky="w")
+
+        # High MTU
+        self.high_mtu_var = tk.BooleanVar(value=not is_macos)
+        self.chk_high_mtu = ttk.Checkbutton(settings_frame, text="High MTU", variable=self.high_mtu_var)
+        self.chk_high_mtu.grid(row=1, column=0, sticky="w", padx=5, pady=(4, 0))
+        if is_macos:
+            self.chk_high_mtu.config(state="disabled")
+            ttk.Label(settings_frame, text="(not supported on macOS)", foreground="gray") \
+                .grid(row=1, column=1, columnspan=4, sticky="w", padx=5, pady=(4, 0))
 
         # --- Section 2: Firmware File ---
         file_frame = ttk.LabelFrame(root, text="Firmware", padding=10)
@@ -237,12 +249,13 @@ class DfuApp:
             prn_val = 8
 
         force_scan = self.force_scan_var.get()
+        high_mtu = self.high_mtu_var.get()
 
         self.start_btn.config(state="disabled")
         self.scan_btn.config(state="disabled")
 
         # We start the update process, which includes ensuring scan is stopped
-        self.async_helper.run_task(self._async_perform_dfu(zip_path, self.selected_device, prn_val, force_scan))
+        self.async_helper.run_task(self._async_perform_dfu(zip_path, self.selected_device, prn_val, force_scan, high_mtu))
 
     async def _stop_scan_if_running(self):
         """Helper to stop the scanner if it is currently running."""
@@ -253,17 +266,18 @@ class DfuApp:
             while self.scanner is not None:
                 await asyncio.sleep(0.1)
 
-    async def _async_perform_dfu(self, zip_path, device, prn_val, force_scan):
+    async def _async_perform_dfu(self, zip_path, device, prn_val, force_scan, high_mtu):
         try:
             # 1. Stop any active scan before starting DFU
             await self._stop_scan_if_running()
 
-            self.log(f"Starting DFU (PRN={prn_val}, ForceScan={force_scan})...")
+            self.log(f"Starting DFU (PRN={prn_val}, ForceScan={force_scan}, HighMTU={high_mtu})...")
 
             dfu = NordicLegacyDFU(
                 zip_path,
                 prn=prn_val,
                 packet_delay=0.4,
+                high_mtu=high_mtu,
                 progress_callback=self.update_progress,
                 log_callback=self.log
             )

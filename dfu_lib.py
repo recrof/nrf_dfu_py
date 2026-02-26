@@ -27,7 +27,17 @@ OP_CODE_PACKET_RECEIPT_NOTIF_REQ = 0x08
 OP_CODE_RESPONSE_CODE = 0x10
 OP_CODE_PACKET_RECEIPT_NOTIF = 0x11
 OP_CODE_ENTER_BOOTLOADER = 0x01
+UPLOAD_MODE_SOFTDEVICE  = 0x01
+UPLOAD_MODE_BOOTLOADER  = 0x02
+UPLOAD_MODE_SD_BL       = 0x03  # SoftDevice + Bootloader combined
 UPLOAD_MODE_APPLICATION = 0x04
+
+_UPLOAD_MODE_NAMES = {
+    UPLOAD_MODE_SOFTDEVICE:  "SoftDevice",
+    UPLOAD_MODE_BOOTLOADER:  "Bootloader",
+    UPLOAD_MODE_SD_BL:       "SoftDevice+Bootloader",
+    UPLOAD_MODE_APPLICATION: "Application",
+}
 
 logger = logging.getLogger("DFU_LIB")
 
@@ -36,18 +46,24 @@ class DfuException(Exception):
 
 class NordicLegacyDFU:
     def __init__(self, zip_path: str, prn: int, packet_delay: float, adapter: str = None,
+                 high_mtu: bool = True,
                  progress_callback: Callable[[int], None] = None,
                  log_callback: Callable[[str], None] = None):
         self.zip_path = zip_path
         self.prn = prn
         self.packet_delay = packet_delay
         self.adapter = adapter
+        self.high_mtu = high_mtu
         self.progress_callback = progress_callback
         self.log_callback = log_callback
 
         self.manifest = None
         self.bin_data = None
         self.dat_data = None
+        self.upload_mode = UPLOAD_MODE_APPLICATION
+        self.sd_size = 0
+        self.bl_size = 0
+        self.app_size = 0
         self.client: Optional[BleakClient] = None
 
         self.response_queue = asyncio.Queue()
@@ -69,6 +85,9 @@ class NordicLegacyDFU:
 
     async def _setup_mtu(self):
         if not self.client:
+            return 23
+
+        if not self.high_mtu:
             return 23
 
         if hasattr(self.client, "_backend"):
@@ -95,21 +114,89 @@ class NordicLegacyDFU:
                 with z.open('manifest.json') as f:
                     self.manifest = json.load(f)
 
-                if 'manifest' in self.manifest and 'application' in self.manifest['manifest']:
-                    app_info = self.manifest['manifest']['application']
-                    self.bin_data = z.read(app_info['bin_file'])
-                    self.dat_data = z.read(app_info['dat_file'])
+                m = self.manifest.get('manifest', {})
+
+                if 'softdevice_bootloader' in m:
+                    info = m['softdevice_bootloader']
+                    self.bin_data = z.read(info['bin_file'])
+                    self.dat_data = z.read(info['dat_file'])
+                    self.sd_size = info.get('sd_size', 0)
+                    self.bl_size = info.get('bl_size', 0)
+                    if self.sd_size == 0 and self.bl_size == 0:
+                        raise DfuException(
+                            "softdevice_bootloader manifest entry must include 'sd_size' and 'bl_size'.")
+                    self.app_size = 0
+                    self.upload_mode = UPLOAD_MODE_SD_BL
+
+                elif 'bootloader' in m:
+                    info = m['bootloader']
+                    self.bin_data = z.read(info['bin_file'])
+                    self.dat_data = z.read(info['dat_file'])
+                    self.sd_size = 0
+                    self.bl_size = len(self.bin_data)
+                    self.app_size = 0
+                    self.upload_mode = UPLOAD_MODE_BOOTLOADER
+
+                elif 'softdevice' in m:
+                    info = m['softdevice']
+                    self.bin_data = z.read(info['bin_file'])
+                    self.dat_data = z.read(info['dat_file'])
+                    self.sd_size = len(self.bin_data)
+                    self.bl_size = 0
+                    self.app_size = 0
+                    self.upload_mode = UPLOAD_MODE_SOFTDEVICE
+
+                elif 'application' in m:
+                    info = m['application']
+                    self.bin_data = z.read(info['bin_file'])
+                    self.dat_data = z.read(info['dat_file'])
+                    self.sd_size = 0
+                    self.bl_size = 0
+                    self.app_size = len(self.bin_data)
+                    self.upload_mode = UPLOAD_MODE_APPLICATION
+
                 else:
-                    raise DfuException("Zip must contain an Application firmware manifest.")
+                    raise DfuException(
+                        "Unrecognized manifest. Expected one of: application, bootloader, "
+                        "softdevice, or softdevice_bootloader.")
+
             else:
                 self._log("No manifest.json. Attempting legacy compatibility mode.")
                 files = z.namelist()
-                bin_file = next((f for f in files if f.endswith('.bin') and 'application' in f.lower()), None)
-                dat_file = next((f for f in files if f.endswith('.dat') and 'application' in f.lower()), None)
 
-                if bin_file and dat_file:
-                    self.bin_data = z.read(bin_file)
-                    self.dat_data = z.read(dat_file)
+                bl_bin  = next((f for f in files if f.endswith('.bin') and 'bootloader'  in f.lower()), None)
+                sd_bin  = next((f for f in files if f.endswith('.bin') and 'softdevice'  in f.lower()), None)
+                app_bin = next((f for f in files if f.endswith('.bin') and 'application' in f.lower()), None)
+                bl_dat  = next((f for f in files if f.endswith('.dat') and 'bootloader'  in f.lower()), None)
+                sd_dat  = next((f for f in files if f.endswith('.dat') and 'softdevice'  in f.lower()), None)
+                app_dat = next((f for f in files if f.endswith('.dat') and 'application' in f.lower()), None)
+
+                if bl_bin and sd_bin:
+                    raise DfuException(
+                        "Found both softdevice and bootloader BINs without a manifest.json. "
+                        "Cannot determine individual sizes. Please add a manifest.json with "
+                        "'sd_size' and 'bl_size'.")
+                elif bl_bin:
+                    self.bin_data = z.read(bl_bin)
+                    self.dat_data = z.read(bl_dat) if bl_dat else b''
+                    self.sd_size = 0
+                    self.bl_size = len(self.bin_data)
+                    self.app_size = 0
+                    self.upload_mode = UPLOAD_MODE_BOOTLOADER
+                elif sd_bin:
+                    self.bin_data = z.read(sd_bin)
+                    self.dat_data = z.read(sd_dat) if sd_dat else b''
+                    self.sd_size = len(self.bin_data)
+                    self.bl_size = 0
+                    self.app_size = 0
+                    self.upload_mode = UPLOAD_MODE_SOFTDEVICE
+                elif app_bin and app_dat:
+                    self.bin_data = z.read(app_bin)
+                    self.dat_data = z.read(app_dat)
+                    self.sd_size = 0
+                    self.bl_size = 0
+                    self.app_size = len(self.bin_data)
+                    self.upload_mode = UPLOAD_MODE_APPLICATION
                 else:
                     raise DfuException("Could not auto-detect firmware files in ZIP.")
 
@@ -182,18 +269,17 @@ class NordicLegacyDFU:
                     while not self.response_queue.empty(): self.response_queue.get_nowait()
 
                     # Start DFU
-                    start_payload = bytearray([OP_CODE_START_DFU, UPLOAD_MODE_APPLICATION])
+                    mode_name = _UPLOAD_MODE_NAMES.get(self.upload_mode, f"0x{self.upload_mode:02x}")
+                    self._log(f"Firmware type: {mode_name} (mode=0x{self.upload_mode:02x})")
+                    start_payload = bytearray([OP_CODE_START_DFU, self.upload_mode])
                     await client.write_gatt_char(DFU_CONTROL_POINT_UUID, start_payload, response=True)
 
                     if self.packet_delay > 0:
                         await asyncio.sleep(self.packet_delay)
 
-                    sd_size = 0
-                    bl_size = 0
-                    app_size = len(self.bin_data)
-                    size_payload = struct.pack('<III', sd_size, bl_size, app_size)
+                    size_payload = struct.pack('<III', self.sd_size, self.bl_size, self.app_size)
 
-                    self._log(f"Sending Size: {app_size} bytes")
+                    self._log(f"Sending sizes: SD={self.sd_size} BL={self.bl_size} App={self.app_size} bytes")
                     await client.write_gatt_char(DFU_PACKET_UUID, size_payload, response=False)
 
                     status = await self._wait_for_response(OP_CODE_START_DFU, timeout=60.0)
@@ -250,10 +336,13 @@ class NordicLegacyDFU:
                     raise e
 
     async def _stream_firmware(self):
-        # Suppress warning when reading MTU for chunk calculation
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            mtu = self.client.mtu_size if self.client else 23
+        if not self.high_mtu:
+            mtu = 23
+        else:
+            # Suppress warning when reading MTU for chunk calculation
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                mtu = self.client.mtu_size if self.client else 23
         chunk_size = min(mtu - 3, 244)  # ATT overhead, cap at 244
         if chunk_size < 20: chunk_size = 20
         self._log(f"Using chunk_size = {chunk_size}")

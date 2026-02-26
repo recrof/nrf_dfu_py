@@ -17,6 +17,8 @@ This project has been split into a modular library, a Command Line Interface (CL
 *   **Persistent Scanning:** The `--wait` flag allows the CLI to loop indefinitely until a target device appears.
 *   **Buttonless DFU:** Automatically switches the device from Application mode to Bootloader mode.
 *   **Legacy DFU Protocol:** Supports the standard Nordic Legacy DFU process (SDK < 12 or Adafruit Bootloader).
+*   **All Firmware Types:** Auto-detects firmware type from the ZIP manifest — Application, Bootloader, SoftDevice, or combined SoftDevice+Bootloader.
+*   **Configurable MTU:** High-MTU mode (large BLE packets) can be toggled; automatically disabled on macOS where it is not supported.
 *   **Tunable:** Configurable Packet Receipt Notification (PRN), timeouts, retries, and transmission delays.
 
 ## Prerequisites
@@ -53,11 +55,12 @@ python dfu_gui.py
 ```
 
 **Steps:**
-1.  **Browse ZIP:** Select your firmware package.
+1.  **Browse ZIP:** Select your firmware package. The firmware type (Application, Bootloader, SoftDevice, or SoftDevice+Bootloader) is detected automatically from the ZIP manifest.
 2.  **Settings:**
     *   **Force Scan:** (Default: On) Forces a fresh discovery to find device services.
     *   **PRN:** (Default: 8) Packet Receipt Notification interval.
     *   **Scan Timeout:** (Default: 5s) How long to search for devices.
+    *   **High MTU:** (Default: On) Enables high-MTU negotiation for faster transfers using large BLE packets. Automatically disabled and grayed out on macOS, where it is not supported.
 3.  **Scan Devices:** Click to populate the list. Devices are sorted by signal strength.
 4.  **Select Device:** Click on the target device in the list.
 5.  **Start Update:** Begins the DFU process. Check the "Log" window for details.
@@ -76,13 +79,14 @@ python dfu_cli.py <zip_file> <device_1> [device_2 ...] [options]
 
 | Argument | Description |
 | :--- | :--- |
-| `file` | Path to the `.zip` firmware file. |
+| `file` | Path to the `.zip` firmware file. Firmware type is auto-detected from the manifest. |
 | `device` | **One or more** BLE names (e.g., `MyDevice`) or MAC Addresses. The tool will scan for all provided identifiers. |
 | `--wait` | Loop indefinitely scanning for the provided device(s) until one is found. |
 | `--retry <N>` | Number of connection/update attempts if failures occur (Default: `3`). |
 | `--scan` | Force a scan for the device even if a MAC address is provided (Recommended). |
 | `--prn <N>` | Packet Receipt Notification interval. Default is `8`. |
 | `--delay <S>` | **Critical:** Delay in seconds between "Start DFU" and "Firmware Size". Default is `0.4`. |
+| `--no-high-mtu` | Disable high-MTU negotiation and use 20-byte chunks. Automatically forced on macOS. |
 | `--verbose` | Enable debug logging to see detailed BLE traffic. |
 
 #### Examples
@@ -125,6 +129,34 @@ You can compile this tool into a standalone executable (`.exe`, `.app`, or Linux
     *   `--windowed` hides the console window.
     *   `--onefile` bundles everything into a single file.
 
+## Firmware ZIP Format
+
+The tool automatically detects the firmware type from the `manifest.json` inside the ZIP. The following manifest keys are supported:
+
+| Manifest key | DFU mode | Size packet sent |
+| :--- | :--- | :--- |
+| `application` | Application (0x04) | `[0, 0, app_size]` |
+| `bootloader` | Bootloader (0x02) | `[0, bl_size, 0]` |
+| `softdevice` | SoftDevice (0x01) | `[sd_size, 0, 0]` |
+| `softdevice_bootloader` | SoftDevice + Bootloader (0x03) | `[sd_size, bl_size, 0]` |
+
+For `softdevice_bootloader`, the manifest entry **must** include `sd_size` and `bl_size` fields so the tool can report the correct individual image sizes to the bootloader:
+
+```json
+{
+  "manifest": {
+    "softdevice_bootloader": {
+      "bin_file": "sd_bl.bin",
+      "dat_file": "sd_bl.dat",
+      "sd_size": 151552,
+      "bl_size": 32768
+    }
+  }
+}
+```
+
+If no `manifest.json` is present, the tool falls back to filename detection: files containing `bootloader`, `softdevice`, or `application` in their name are matched accordingly.
+
 ## Troubleshooting
 
 ### "Device not found"
@@ -138,6 +170,10 @@ This occurs when the computer sends the firmware size packet before the device h
 
 ### "Upload failed" or Stalling
 *   Try reducing the PRN value: `--prn 4` or `--prn 1`. This slows down the upload but ensures the device acknowledges packets more frequently.
+
+### Slow transfers or connection issues on macOS
+*   macOS (CoreBluetooth) does not support explicit MTU negotiation. High-MTU mode is automatically disabled on macOS; 20-byte chunks are always used.
+*   If you see errors related to MTU on other platforms, use `--no-high-mtu` (CLI) or uncheck **High MTU** (GUI).
 
 ## Compatibility
 
