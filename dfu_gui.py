@@ -72,7 +72,7 @@ class DfuApp:
         self.spin_timeout.grid(row=0, column=4, sticky="w")
 
         # High MTU
-        self.high_mtu_var = tk.BooleanVar(value=not is_macos)
+        self.high_mtu_var = tk.BooleanVar(value=False)
         self.chk_high_mtu = ttk.Checkbutton(settings_frame, text="High MTU", variable=self.high_mtu_var)
         self.chk_high_mtu.grid(row=1, column=0, sticky="w", padx=5, pady=(4, 0))
         if is_macos:

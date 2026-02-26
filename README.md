@@ -18,7 +18,7 @@ This project has been split into a modular library, a Command Line Interface (CL
 *   **Buttonless DFU:** Automatically switches the device from Application mode to Bootloader mode.
 *   **Legacy DFU Protocol:** Supports the standard Nordic Legacy DFU process (SDK < 12 or Adafruit Bootloader).
 *   **All Firmware Types:** Auto-detects firmware type from the ZIP manifest — Application, Bootloader, SoftDevice, or combined SoftDevice+Bootloader.
-*   **Configurable MTU:** High-MTU mode (large BLE packets) can be toggled; automatically disabled on macOS where it is not supported.
+*   **Configurable MTU:** High-MTU mode (large BLE packets) can be enabled for faster transfers; disabled by default for maximum compatibility.
 *   **Tunable:** Configurable Packet Receipt Notification (PRN), timeouts, retries, and transmission delays.
 
 ## Prerequisites
@@ -60,7 +60,7 @@ python dfu_gui.py
     *   **Force Scan:** (Default: On) Forces a fresh discovery to find device services.
     *   **PRN:** (Default: 8) Packet Receipt Notification interval.
     *   **Scan Timeout:** (Default: 5s) How long to search for devices.
-    *   **High MTU:** (Default: On) Enables high-MTU negotiation for faster transfers using large BLE packets. Automatically disabled and grayed out on macOS, where it is not supported.
+    *   **High MTU:** (Default: Off) Enables high-MTU negotiation for faster transfers using large BLE packets. Locked off and grayed out on macOS.
 3.  **Scan Devices:** Click to populate the list. Devices are sorted by signal strength.
 4.  **Select Device:** Click on the target device in the list.
 5.  **Start Update:** Begins the DFU process. Check the "Log" window for details.
@@ -86,7 +86,7 @@ python dfu_cli.py <zip_file> <device_1> [device_2 ...] [options]
 | `--scan` | Force a scan for the device even if a MAC address is provided (Recommended). |
 | `--prn <N>` | Packet Receipt Notification interval. Default is `8`. |
 | `--delay <S>` | **Critical:** Delay in seconds between "Start DFU" and "Firmware Size". Default is `0.4`. |
-| `--no-high-mtu` | Disable high-MTU negotiation and use 20-byte chunks. Automatically forced on macOS. |
+| `--high-mtu` | Enable high-MTU negotiation for faster transfers (disabled by default). |
 | `--verbose` | Enable debug logging to see detailed BLE traffic. |
 
 #### Examples
@@ -171,9 +171,9 @@ This occurs when the computer sends the firmware size packet before the device h
 ### "Upload failed" or Stalling
 *   Try reducing the PRN value: `--prn 4` or `--prn 1`. This slows down the upload but ensures the device acknowledges packets more frequently.
 
-### Slow transfers or connection issues on macOS
-*   macOS (CoreBluetooth) does not support explicit MTU negotiation. High-MTU mode is automatically disabled on macOS; 20-byte chunks are always used.
-*   If you see errors related to MTU on other platforms, use `--no-high-mtu` (CLI) or uncheck **High MTU** (GUI).
+### MTU / transfer issues
+*   High-MTU mode is disabled by default. If transfers stall or produce errors, ensure it is off (do not pass `--high-mtu` on the CLI; leave **High MTU** unchecked in the GUI).
+*   On macOS (CoreBluetooth), explicit MTU negotiation is not supported. The **High MTU** option is locked off on macOS regardless of the flag.
 
 ## Compatibility
 

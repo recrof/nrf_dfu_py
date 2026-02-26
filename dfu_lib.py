@@ -46,7 +46,7 @@ class DfuException(Exception):
 
 class NordicLegacyDFU:
     def __init__(self, zip_path: str, prn: int, packet_delay: float, adapter: str = None,
-                 high_mtu: bool = True,
+                 high_mtu: bool = False,
                  progress_callback: Callable[[int], None] = None,
                  log_callback: Callable[[str], None] = None):
         self.zip_path = zip_path
